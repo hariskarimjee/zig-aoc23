@@ -1,13 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Number = struct { x: usize, y: usize, xspan: usize, num: u64, symbol: u8 };
+const Symbol = struct { x: usize, y: usize, sym: u8, nums: std.ArrayList(u64) = undefined };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    const result = try solve(allocator, "data/day3.txt");
-    std.debug.print("answer: {d}\n", .{result});
+    var result = try solve(allocator, "data/day3.txt");
+    std.debug.print("answer part 1: {d}\n", .{result});
+    result = try solve2(allocator, "data/day3.txt");
+    std.debug.print("answer part 2: {d}\n", .{result});
 }
 
 fn solve(allocator: Allocator, filepath: []const u8) !u64 {
@@ -16,13 +18,33 @@ fn solve(allocator: Allocator, filepath: []const u8) !u64 {
     defer allocator.free(inputData);
     const inputMatrix = try getMatrix(allocator, inputData);
     defer inputMatrix.deinit();
-    const numbers = try findNumbers(allocator, inputMatrix);
-    defer numbers.deinit();
-    for (numbers.items) |*number| {
-        if (try isTouchingSymbol(number, inputMatrix)) {
-            sum += number.num;
+    const syms = try findSymbols(allocator, inputMatrix);
+    for (syms.items) |symbol| {
+        if (symbol.nums.items.len > 0) {
+            for (symbol.nums.items) |num| sum += num;
         }
     }
+    for (syms.items) |item| item.nums.deinit();
+    syms.deinit();
+    return sum;
+}
+
+fn solve2(allocator: Allocator, filepath: []const u8) !u64 {
+    var sum: u64 = 0;
+    const inputData = try std.fs.cwd().readFileAlloc(allocator, filepath, 1e6);
+    defer allocator.free(inputData);
+    const inputMatrix = try getMatrix(allocator, inputData);
+    defer inputMatrix.deinit();
+    const syms = try findSymbols(allocator, inputMatrix);
+    for (syms.items) |symbol| {
+        if (symbol.nums.items.len == 2 and symbol.sym == '*') {
+            var ratio: u64 = 1;
+            for (symbol.nums.items) |num| ratio *= num;
+            sum += ratio;
+        }
+    }
+    for (syms.items) |item| item.nums.deinit();
+    syms.deinit();
     return sum;
 }
 
@@ -36,61 +58,59 @@ fn getMatrix(allocator: Allocator, inputData: []const u8) !std.ArrayList([]const
     return inputMatrix;
 }
 
-fn findNumbers(allocator: Allocator, inputMatrix: std.ArrayList([]const u8)) !std.ArrayList(Number) {
-    var numbers = std.ArrayList(Number).init(allocator);
-    var num: Number = undefined;
-    var midNumber: bool = false;
-    const input = inputMatrix.items;
-    for (input, 0..) |line, i| {
-        for (line, 0..) |char, j| {
-            if (std.ascii.isDigit(char)) {
-                if (!midNumber) {
-                    midNumber = true;
-                    num.x = j;
-                    num.y = i;
-                    num.xspan = 1;
-                } else {
-                    num.xspan += 1;
-                    if (j == line.len - 1) {
-                        num.num = try std.fmt.parseInt(u64, line[num.x..(num.x + num.xspan)], 0);
-                        try numbers.append(num);
-                        midNumber = false;
-                    }
-                }
-            } else {
-                if (midNumber) {
-                    num.num = std.fmt.parseInt(u64, line[num.x..(num.x + num.xspan)], 0) catch |e| switch (e) {
-                        std.fmt.ParseIntError.InvalidCharacter => {
-                            std.debug.print("Couldn't parse integer: {s}, xpos: {d}, ypos: {d}.\n Line: {s}", .{ line[num.x..(num.x + num.xspan)], num.x, num.y, line });
-                            return e;
-                        },
-                        std.fmt.ParseIntError.Overflow => {
-                            std.debug.print("Integer overflow on type.", .{});
-                            return e;
-                        },
-                    };
+fn findSymbols(allocator: Allocator, inputMatrix: std.ArrayList([]const u8)) !std.ArrayList(Symbol) {
+    var symbols = std.ArrayList(Symbol).init(allocator);
+    var i: usize = 0;
 
-                    try numbers.append(num);
-                    midNumber = false;
-                }
-            }
+    while (i < inputMatrix.items.len) : (i += 1) {
+        var j: usize = 0;
+        const line = inputMatrix.items[i];
+
+        while (j < line.len) : (j += 1) {
+            const char = line[j];
+            if (std.ascii.isDigit(char) or char == '.') continue;
+
+            var sym: Symbol = .{ .x = j, .y = i, .sym = char };
+            try findNumsAroundSym(allocator, &sym, inputMatrix);
+            try symbols.append(sym);
         }
     }
-    return numbers;
+    return symbols;
 }
 
-fn isTouchingSymbol(number: *Number, inputMatrix: std.ArrayList([]const u8)) !bool {
-    const miny: usize = if (@as(isize, @intCast(number.y)) - 1 < 0) 0 else number.y - 1;
-    const maxy: usize = if (number.y + 2 >= inputMatrix.items.len) (inputMatrix.items.len) else number.y + 2;
-    for (inputMatrix.items[miny..maxy]) |line| {
-        const minx: usize = if (@as(isize, @intCast(number.x)) - 1 < 0) 0 else number.x - 1;
-        const maxx: usize = if (number.x + number.xspan + 1 >= line.len) (line.len) else number.x + number.xspan + 1;
-        for (line[minx..maxx]) |char| {
-            if (!std.ascii.isDigit(char) and (char != '.')) {
-                number.symbol = char;
-                return true;
-            }
+fn findNumsAroundSym(allocator: Allocator, sym: *Symbol, inputMatrix: std.ArrayList([]const u8)) !void {
+    sym.nums = std.ArrayList(u64).init(allocator);
+    if (sym.y != 0) {
+        if (!(try checkForNumAndParse(inputMatrix.items[sym.y - 1], sym, sym.x))) {
+            _ = try checkForNumAndParse(inputMatrix.items[sym.y - 1], sym, sym.x - 1);
+            _ = try checkForNumAndParse(inputMatrix.items[sym.y - 1], sym, sym.x + 1);
         }
+    }
+    _ = try checkForNumAndParse(inputMatrix.items[sym.y], sym, sym.x - 1);
+    _ = try checkForNumAndParse(inputMatrix.items[sym.y], sym, sym.x + 1);
+    if (sym.y != inputMatrix.items.len) {
+        if (!(try checkForNumAndParse(inputMatrix.items[sym.y + 1], sym, sym.x))) {
+            _ = try checkForNumAndParse(inputMatrix.items[sym.y + 1], sym, sym.x - 1);
+            _ = try checkForNumAndParse(inputMatrix.items[sym.y + 1], sym, sym.x + 1);
+        }
+    }
+}
+
+fn checkForNumAndParse(line: []const u8, sym: *Symbol, offset: usize) !bool {
+    var start: usize = undefined;
+    var end: usize = undefined;
+    var index: usize = offset;
+    if (std.ascii.isDigit(line[index])) {
+        start = while (std.ascii.isDigit(line[index])) : (index -= 1) {
+            if (index == 0) break 0;
+        } else index + 1;
+        index = offset;
+        end = while (std.ascii.isDigit(line[index])) : (index += 1) {
+            if (index == line.len - 1) break line.len;
+        } else index;
+        const num = try std.fmt.parseInt(u64, line[start..end], 0);
+        try sym.nums.append(num);
+        return true;
     }
     return false;
 }
@@ -103,31 +123,38 @@ test "get input matrix" {
     try std.testing.expect(inputMatrix.items[1][3] == '*');
 }
 
-test "get first nums" {
+test "find symbols" {
     const inputData = try std.fs.cwd().readFileAlloc(std.testing.allocator, "data/day3test.txt", 1e3);
     defer std.testing.allocator.free(inputData);
     const inputMatrix = try getMatrix(std.testing.allocator, inputData);
     defer inputMatrix.deinit();
-    const numbers = try findNumbers(std.testing.allocator, inputMatrix);
-    defer numbers.deinit();
-    try std.testing.expect(numbers.items[0].num == 467);
-    try std.testing.expect(numbers.items[0].xspan == 3);
+    const syms = try findSymbols(std.testing.allocator, inputMatrix);
+    try std.testing.expect(syms.items[0].sym == '*' and syms.items[0].x == 3 and syms.items[0].y == 1);
+    for (syms.items) |item| item.nums.deinit();
+    syms.deinit();
 }
 
-test "get num symbol" {
+test "find nums around sym" {
     const inputData = try std.fs.cwd().readFileAlloc(std.testing.allocator, "data/day3test.txt", 1e3);
     defer std.testing.allocator.free(inputData);
     const inputMatrix = try getMatrix(std.testing.allocator, inputData);
     defer inputMatrix.deinit();
-    var numbers = try findNumbers(std.testing.allocator, inputMatrix);
-    defer numbers.deinit();
-    try std.testing.expect(try isTouchingSymbol(&numbers.items[0], inputMatrix));
-    try std.testing.expect(numbers.items[0].symbol == '*');
+    const syms = try findSymbols(std.testing.allocator, inputMatrix);
+    // try findNumsAroundSym(std.testing.allocator, syms[0], inputMatrix);
+    try std.testing.expect(syms.items[0].nums.items.len == 2);
+    try std.testing.expect(syms.items[0].nums.items[0] == 467);
+    for (syms.items) |item| item.nums.deinit();
+    syms.deinit();
 }
 
 test "solve" {
     const result = try solve(std.testing.allocator, "data/day3test.txt");
     try std.testing.expect(result == 4361);
+}
+
+test "solve2" {
+    const result = try solve2(std.testing.allocator, "data/day3test.txt");
+    try std.testing.expect(result == 467835);
 }
 
 //answer 532428
